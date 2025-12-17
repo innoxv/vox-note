@@ -1,0 +1,13 @@
+# Node modules
+node_modules/
+
+# Local env files
+.env
+.env.local
+
+# Logs
+logs/
+*.log
+
+# Debug
+.vscode/
