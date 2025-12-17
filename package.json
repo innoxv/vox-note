@@ -1,0 +1,20 @@
+{
+  "name": "telegram-ai-support-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.88.0",
+    "@xenova/transformers": "^2.17.2",
+    "dotenv": "^17.2.3",
+    "gtts": "^0.2.1",
+    "node-fetch": "^3.3.2",
+    "telegraf": "^4.16.3"
+  }
+}
