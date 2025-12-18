@@ -267,7 +267,7 @@ const QUESTION_PATTERNS = [
 ];
 
 ## Common Issues & Fixes
-Issue 1: "FFmpeg not found" Error
+1. Issue 1: "FFmpeg not found" Error
 Error Message: Error: spawn ffmpeg ENOENT
 Solution:
 
@@ -284,7 +284,8 @@ brew install ffmpeg
 
  Windows:
 choco install ffmpeg
-Issue 2: "Supabase connection failed"
+
+2. Issue 2: "Supabase connection failed"
 Error Message: FetchError: request to https://... failed
 Solution:
 
@@ -301,7 +302,8 @@ const supabase = createClient(process.env.EXPO_PUBLIC_SUPABASE_URL, process.env.
 supabase.from('knowledge_base').select('count')
   .then(console.log)
   .catch(console.error);
-Issue 3: "Whisper model download failed"
+
+3. Issue 3: "Whisper model download failed"
 Error Message: Error: Failed to fetch model from HuggingFace
 Solution:
 
@@ -313,7 +315,8 @@ Or download manually:
 
 bash
 wget https://huggingface.co/Xenova/whisper-tiny.en/resolve/main/model.onnx
-Issue 4: "Audio transcription returns empty"
+
+4. Issue 4: "Audio transcription returns empty"
 Error Message: Transcription result: ""
 Solution:
 
@@ -322,9 +325,20 @@ Check audio sample rate (must be 16000Hz):
 javascript
 // Add validation
 console.log('Audio sample rate:', audioData.length / 16000, 'seconds');
+
 Ensure proper audio format conversion
 
 Add noise reduction in noisy environments
+
+5. Issue 5: "Voice synthesis failed"
+Error Message: gTTS save error
+Solution:
+
+Check internet connection (gTTS needs internet)
+
+Reduce text length (Telegram has 1 minute voice limit)
+
+Implement fallback to text-only response
 
 ## References & Resources
 
