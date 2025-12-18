@@ -16,15 +16,15 @@ Node.js/Telegraf: Rapid development with strong ecosystem support
 
 End Goal: Create a fully functional AI voice support bot that:
 
-Accepts voice messages and transcribes them to text
-
-Searches a knowledge base for relevant answers using RAG principles
-
-Responds with both text and synthesized voice
-
-Learns dynamically from user interactions via /add command
-
-Provides 24/7 automated support with natural conversation flow
+  Accepts voice messages and transcribes them to text
+  
+  Searches a knowledge base for relevant answers using RAG principles
+  
+  Responds with both text and synthesized voice
+  
+  Learns dynamically from user interactions via /add command
+  
+  Provides 24/7 automated support with natural conversation flow
 
 ## Quick Summary of the Technology
 What is this technology stack?
@@ -327,8 +327,8 @@ Ensure proper audio format conversion
 Add noise reduction in noisy environments
 
 ## References & Resources
-Official Documentation
-[Telegraf.js Docs](https://telegraf.js.org/): Complete Telegram Bot API wrapper - 
+
+[Official Documentation Telegraf.js Docs](https://telegraf.js.org/): Complete Telegram Bot API wrapper - 
 
 [Xenova Transformers](https://github.com/xenova/transformers.js): Browser-ready ML models
 
@@ -338,8 +338,7 @@ Official Documentation
 
 [FFmpeg Docs](https://ffmpeg.org/documentation.html): Audio/video processing
 
-Tutorials & Guides
-[Building Telegram Bots with Node.js](https://core.telegram.org/bots/tutorial): Official tutorial
+[Tutorials & Guides Building Telegram Bots with Node.js](https://core.telegram.org/bots/tutorial): Official tutorial
 
 [Whisper AI Implementation Guide](https://huggingface.co/docs/transformers/model_doc/whisper): Model specifics
 
