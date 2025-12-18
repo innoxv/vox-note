@@ -35,52 +35,103 @@ try {
   console.warn('Could not initialize Supabase client:', e?.message || e);
 }
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-let transcriber = null;
+const bot = new Telegraf(process.env.BOT_TOKEN, {
+  telegram: {
+    // Optimize for memory
+    agent: null,
+    timeout: 10000
+  }
+});
 
-// ==================== HEALTH CHECK ENDPOINT ====================
+// ==================== MEMORY OPTIMIZATION ====================
+
+let transcriber = null;
+let isModelLoading = false;
+let modelLoadQueue = [];
+
+// Lazy load Whisper model to save memory
+const loadTranscriber = async () => {
+  if (transcriber) return transcriber;
+  
+  if (isModelLoading) {
+    // Wait for model to load if another request is loading it
+    return new Promise(resolve => {
+      modelLoadQueue.push(resolve);
+    });
+  }
+  
+  isModelLoading = true;
+  console.log('Loading Whisper model (lazy load)...');
+  
+  try {
+    // Use smaller batch size to reduce memory
+    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
+      device: 'cpu',
+      quantized: true
+    });
+    
+    console.log('Whisper model loaded');
+    
+    // Resolve all waiting requests
+    while (modelLoadQueue.length) {
+      const resolve = modelLoadQueue.shift();
+      resolve(transcriber);
+    }
+    
+    return transcriber;
+  } catch (error) {
+    console.error('Failed to load Whisper model:', error);
+    isModelLoading = false;
+    throw error;
+  } finally {
+    isModelLoading = false;
+  }
+};
+
+// Memory cleanup helper
+const cleanupMemory = () => {
+  if (global.gc) {
+    try {
+      global.gc();
+      console.log('Garbage collection forced');
+    } catch (e) {
+      console.log('Garbage collection failed:', e.message);
+    }
+  }
+  
+  // Clear any cached data
+  if (transcriber && transcriber.model) {
+    // Clear model cache if possible
+    try {
+      transcriber.model.dispose && transcriber.model.dispose();
+    } catch (e) {
+      // Ignore
+    }
+  }
+};
+
+// ==================== HEALTH CHECK ====================
 
 app.get('/health', (req, res) => {
+  const memory = process.memoryUsage();
+  const heapUsedMB = Math.round(memory.heapUsed / 1024 / 1024);
+  const heapTotalMB = Math.round(memory.heapTotal / 1024 / 1024);
+  
   res.json({
     status: 'ok',
-    service: 'telegram-ai-support-bot',
+    service: 'voice-support-bot',
     timestamp: new Date().toISOString(),
+    memory: {
+      heapUsed: heapUsedMB + 'MB',
+      heapTotal: heapTotalMB + 'MB',
+      rss: Math.round(memory.rss / 1024 / 1024) + 'MB'
+    },
     supabase: supabaseAvailable ? 'connected' : 'disconnected',
-    whisper: transcriber ? 'loaded' : 'loading'
+    whisper: transcriber ? 'loaded' : 'not-loaded'
   });
 });
 
-// ==================== ENHANCED MATCHING FUNCTIONS ====================
-
-const SYNONYM_MAP = {
-  'hello': ['hi', 'hey', 'hi there', 'hello there'],
-  'how are you': ['how do you do', 'hows it going', 'whats up'],
-  'what are you': ['who are you', 'what is this'],
-  'help': ['support', 'assist', 'aid'],
-  'thank you': ['thanks', 'thx', 'appreciate it'],
-  'bye': ['goodbye', 'see you', 'farewell'],
-  'voice': ['speak', 'talk', 'microphone'],
-  'account': ['login', 'sign in', 'profile'],
-  'password': ['reset password', 'forgot password'],
-};
-
-const QUESTION_PATTERNS = [
-  { regex: /^(what|who|where|when|why|how|can|is|are|do|does|will|would|should|could)\b/i, type: 'question' },
-  { regex: /\?$/, type: 'question' },
-];
-
-const calculateWordOverlap = (str1, str2) => {
-  const words1 = str1.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  const words2 = str2.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  
-  if (words1.length === 0 || words2.length === 0) return 0;
-  
-  const commonWords = words1.filter(word => 
-    words2.some(w2 => w2.includes(word) || word.includes(w2))
-  );
-  
-  return commonWords.length / Math.max(words1.length, words2.length);
-};
+// ==================== SIMPLIFIED MATCHING ====================
 
 const findInSupabase = async (query) => {
   if (!supabaseAvailable) return null;
@@ -88,75 +139,38 @@ const findInSupabase = async (query) => {
   try {
     const q = query.trim().toLowerCase();
     
-    // Exact match
-    let { data, error } = await supabase
+    // Simple exact match first
+    const { data, error } = await supabase
       .from('knowledge_base')
-      .select('question, answer, content')
+      .select('question, answer')
       .ilike('question', q)
       .limit(1);
     
     if (error) throw error;
     if (data && data.length > 0) {
-      return data[0].answer || data[0].content;
+      return data[0].answer;
     }
     
-    // Synonym match
-    for (const [mainQuestion, synonyms] of Object.entries(SYNONYM_MAP)) {
-      if (synonyms.includes(q) || q.includes(mainQuestion)) {
-        const { data: synData } = await supabase
-          .from('knowledge_base')
-          .select('question, answer')
-          .ilike('question', `%${mainQuestion}%`)
-          .limit(1);
-        
-        if (synData && synData.length > 0) {
-          return synData[0].answer;
-        }
-      }
-    }
-    
-    // Search in content
-    const { data: contentMatches } = await supabase
+    // Simple content search
+    const { data: contentData } = await supabase
       .from('knowledge_base')
-      .select('answer, content')
-      .or(`answer.ilike.%${q}%,content.ilike.%${q}%`)
+      .select('answer')
+      .ilike('answer', `%${q}%`)
       .limit(1);
     
-    if (contentMatches && contentMatches.length > 0) {
-      return contentMatches[0].answer || contentMatches[0].content;
+    if (contentData && contentData.length > 0) {
+      return contentData[0].answer;
     }
     
     return null;
   } catch (err) {
-    console.error('Supabase lookup error:', err.message || err);
+    console.error('Supabase lookup error:', err.message);
     return null;
   }
 };
 
 const getDefaultResponse = (query) => {
-  const q = query.toLowerCase().trim();
-  
-  let queryType = 'general';
-  for (const pattern of QUESTION_PATTERNS) {
-    if (pattern.regex.test(q)) {
-      queryType = pattern.type;
-      break;
-    }
-  }
-  
-  if (['hello', 'hi', 'hey'].some(g => q.includes(g))) {
-    queryType = 'greeting';
-  }
-  
-  const responses = {
-    greeting: `Hello! I don't have specific info about "${query}" yet, but I'd love to learn!`,
-    question: `That's a great question about "${query}"! I need to learn more about this topic.`,
-    general: `I'm still learning about "${query}". Would you like to teach me?`
-  };
-  
-  const baseResponse = responses[queryType] || responses.general;
-  
-  return `${baseResponse}\n\nTeach me:\n/add "${query}" || [your answer here]`;
+  return `I don't have information about "${query}" yet. You can add it with: /add "${query}" || [your answer here]`;
 };
 
 const addKnowledge = async (input) => {
@@ -177,106 +191,98 @@ const addKnowledge = async (input) => {
     question = answer.split(/[.!?]/)[0].substring(0, 50).trim() || 'General information';
   }
   
-  if (!question || question.length < 2) {
-    throw new Error('Question is too short or invalid');
-  }
-  
-  if (!answer || answer.length < 2) {
-    throw new Error('Answer is too short or invalid');
-  }
-  
-  const { data: existing } = await supabase
+  const { error } = await supabase
     .from('knowledge_base')
-    .select('id, question')
-    .ilike('question', question)
-    .limit(1);
+    .insert([{ 
+      question,
+      answer,
+      content: answer,
+      created_at: new Date().toISOString()
+    }]);
   
-  let result;
-  if (existing && existing.length > 0) {
-    const { error } = await supabase
+  if (error) {
+    // Try update if exists
+    const { error: updateError } = await supabase
       .from('knowledge_base')
       .update({ 
         answer,
         content: answer,
         updated_at: new Date().toISOString()
       })
-      .eq('id', existing[0].id);
+      .eq('question', question);
     
-    if (error) throw error;
-    result = `Updated: "${existing[0].question}"`;
-  } else {
-    const { error } = await supabase
-      .from('knowledge_base')
-      .insert([{ 
-        question,
-        answer,
-        content: answer,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }]);
-    
-    if (error) throw error;
-    result = `Added: "${question}"`;
+    if (updateError) throw updateError;
+    return `Updated: "${question}"`;
   }
   
-  return { question, answer, result };
+  return `Added: "${question}"`;
 };
 
-// ==================== AUDIO PROCESSING ====================
+// ==================== OPTIMIZED AUDIO PROCESSING ====================
 
-(async () => {
-  try {
-    console.log('Loading Whisper model...');
-    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
-    console.log('Whisper model ready!');
-  } catch (err) {
-    console.error('Failed to load model:', err);
-  }
-})();
-
-const decodeAudioToFloat32 = async (url, samplingRate = 16000) => {
-  const response = await fetch(url);
+const decodeAudioToFloat32 = async (url) => {
+  const response = await fetch(url, { timeout: 10000 });
   const arrayBuffer = await response.arrayBuffer();
   
   const ffmpeg = spawn('ffmpeg', [
     '-i', 'pipe:0',
     '-f', 'f32le',
-    '-ar', String(samplingRate),
+    '-ar', '16000',
     '-ac', '1',
     '-hide_banner',
     '-loglevel', 'error',
+    '-t', '30', // Limit to 30 seconds max
     'pipe:1'
-  ]);
+  ], {
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
   
   ffmpeg.stdin.end(Buffer.from(arrayBuffer));
   
   const chunks = [];
+  let stderr = '';
+  
   ffmpeg.stdout.on('data', chunk => chunks.push(chunk));
+  ffmpeg.stderr.on('data', data => stderr += data.toString());
   
   await new Promise((resolve, reject) => {
-    ffmpeg.on('close', resolve);
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        return reject(new Error(`FFmpeg error: ${stderr}`));
+      }
+      resolve();
+    });
     ffmpeg.on('error', reject);
   });
   
-  const audioData = new Float32Array(Buffer.concat(chunks).buffer);
-  return audioData;
+  const buffer = Buffer.concat(chunks);
+  // Free memory immediately
+  chunks.length = 0;
+  
+  return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
 };
 
 const textToVoice = async (text) => {
   return new Promise((resolve, reject) => {
-    const tts = new gTTS(text, 'en');
+    const tts = new gTTS(text.substring(0, 500), 'en'); // Limit text length
     
     const tempDir = isProduction ? '/tmp' : path.join(__dirname, 'temp');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    
     const tempFile = path.join(tempDir, `tts-${Date.now()}.mp3`);
+    
+    // Ensure temp directory exists
+    if (!fs.existsSync(tempDir)) {
+      try {
+        fs.mkdirSync(tempDir, { recursive: true });
+      } catch (err) {
+        return reject(err);
+      }
+    }
     
     tts.save(tempFile, (err) => {
       if (err) return reject(err);
       
       fs.readFile(tempFile, (readErr, data) => {
+        // Always cleanup temp file
         fs.unlink(tempFile, (unlinkErr) => {
           if (unlinkErr) console.error('Failed to delete temp file:', unlinkErr);
         });
@@ -288,41 +294,10 @@ const textToVoice = async (text) => {
   });
 };
 
-// ==================== BOT COMMANDS ====================
+// ==================== SIMPLIFIED BOT COMMANDS ====================
 
-const getKnowledgeCount = async () => {
-  if (!supabaseAvailable) return 0;
-  try {
-    const { data, error } = await supabase
-      .from('knowledge_base')
-      .select('id');
-    
-    if (error) {
-      console.error('Error getting knowledge count:', error);
-      return 0;
-    }
-    return data ? data.length : 0;
-  } catch (err) {
-    console.error('Error in getKnowledgeCount:', err);
-    return 0;
-  }
-};
-
-bot.start(async (ctx) => {
-  let welcomeMsg;
-  
-  if (supabaseAvailable) {
-    const knowledgeCount = await getKnowledgeCount();
-    welcomeMsg = `Welcome! I'm your AI voice assistant with ${knowledgeCount} pieces of knowledge.\n\n` +
-                `Send voice or text, and I'll reply from my knowledge base!\n` +
-                `Try: /faq - See common questions\n` +
-                `Try: /search [topic] - Search knowledge\n` +
-                `Try: /add "question" || "answer" - Add new knowledge`;
-  } else {
-    welcomeMsg = 'Welcome! Send voice or text. (Knowledge base not available)';
-  }
-  
-  ctx.reply(welcomeMsg);
+bot.start((ctx) => {
+  ctx.reply('Welcome to Voice Support Bot. Send voice or text messages.');
 });
 
 bot.command('add', async (ctx) => {
@@ -330,15 +305,14 @@ bot.command('add', async (ctx) => {
     return ctx.reply('Knowledge base unavailable.');
   }
   
-  const payload = ctx.message.text?.replace(/^\/add\s*/i, '').trim();
+  const payload = ctx.message.text.replace(/^\/add\s*/i, '').trim();
   if (!payload) {
-    return ctx.reply('Usage: /add "question" || "answer"\nExample: /add "What is the return policy?" || "30-day returns"');
+    return ctx.reply('Usage: /add "question" || "answer"');
   }
   
   try {
-    const { question, answer, result } = await addKnowledge(payload);
-    const response = `${result}\n\nQ: ${question}\nA: ${answer.substring(0, 200)}${answer.length > 200 ? '...' : ''}`;
-    ctx.reply(response);
+    const result = await addKnowledge(payload);
+    ctx.reply(result);
   } catch (err) {
     console.error('Add error:', err);
     ctx.reply(`Error: ${err.message}`);
@@ -350,112 +324,74 @@ bot.command('search', async (ctx) => {
     return ctx.reply('Knowledge base unavailable.');
   }
   
-  const query = ctx.message.text?.replace(/^\/search\s*/i, '').trim();
+  const query = ctx.message.text.replace(/^\/search\s*/i, '').trim();
   if (!query) {
-    return ctx.reply('Usage: /search [query]\nExample: /search password reset');
+    return ctx.reply('Usage: /search query');
   }
   
   try {
     const result = await findInSupabase(query);
     if (result) {
-      await ctx.reply(`Found:\n\n${result}`);
+      await ctx.reply(`Found:\n${result}`);
     } else {
       await ctx.reply(`No match found for "${query}"`);
     }
   } catch (err) {
     console.error('Search error:', err);
-    await ctx.reply('Error searching knowledge base.');
+    await ctx.reply('Error searching.');
   }
 });
 
-bot.command('faq', async (ctx) => {
-  if (!supabaseAvailable) {
-    return ctx.reply('Knowledge base unavailable.');
-  }
-  
-  try {
-    const { data } = await supabase
-      .from('knowledge_base')
-      .select('question')
-      .not('question', 'is', null)
-      .order('question')
-      .limit(10);
-    
-    if (data && data.length > 0) {
-      let response = 'Frequently Asked Questions\n\n';
-      data.forEach((item, index) => {
-        response += `${index + 1}. ${item.question}\n`;
-      });
-      
-      response += `\nTotal: ${data.length} questions\nUse /search [topic] to find answers`;
-      await ctx.reply(response);
-    } else {
-      await ctx.reply('No FAQs yet. Add one with /add "question" || "answer"');
-    }
-  } catch (err) {
-    console.error('FAQ error:', err);
-    await ctx.reply('Error loading FAQs.');
-  }
-});
-
-// ==================== MESSAGE HANDLERS ====================
+// ==================== OPTIMIZED MESSAGE HANDLERS ====================
 
 bot.on('voice', async (ctx) => {
-  await ctx.reply('Listening...');
+  await ctx.reply('Processing voice message...');
 
   try {
     const file = await ctx.telegram.getFile(ctx.message.voice.file_id);
     const audioUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
-    const audioFloat32 = await decodeAudioToFloat32(audioUrl, 16000);
-
-    if (!transcriber) {
-      await ctx.reply('Model still loading... try again in a moment.');
-      return;
-    }
-
-    const result = await transcriber(audioFloat32);
-    const userText = result.text?.trim() || 'I heard nothing';
+    const audioFloat32 = await decodeAudioToFloat32(audioUrl);
     
-    await ctx.reply(`You said: ${userText}`);
+    // Load model only when needed
+    const model = await loadTranscriber();
+    const result = await model(audioFloat32);
+    const userText = result.text?.trim() || 'Could not understand';
     
-    if (supabaseAvailable) {
-      // Save transcript
-      try {
-        await supabase.from('messages').insert([{ 
-          user_id: ctx.from?.id?.toString?.() || null, 
-          text: userText, 
-          source: 'voice' 
-        }]);
-      } catch (e) {
-        console.error('Failed to save transcript:', e.message);
-      }
-    }
-
+    // Free audio buffer immediately
+    audioFloat32 = null;
+    
+    // Optional: force garbage collection
+    if (isProduction) cleanupMemory();
+    
+    await ctx.reply(`Transcribed: ${userText}`);
+    
     let replyText;
     if (supabaseAvailable) {
       const kbAnswer = await findInSupabase(userText);
-      if (kbAnswer) {
-        replyText = kbAnswer;
-      } else {
-        replyText = getDefaultResponse(userText);
-      }
+      replyText = kbAnswer || getDefaultResponse(userText);
     } else {
       replyText = getDefaultResponse(userText);
     }
-
+    
+    // Send text reply first
     await ctx.reply(replyText);
-
+    
+    // Then send voice (optional, can be disabled to save memory)
     try {
       const voiceBuffer = await textToVoice(replyText);
       await ctx.replyWithVoice({ source: voiceBuffer });
+      
+      // Free voice buffer
+      voiceBuffer = null;
     } catch (err) {
-      console.error('Voice generation failed:', err.message);
-      await ctx.reply('(Voice reply failed)');
+      console.log('Voice synthesis skipped or failed:', err.message);
+      // Continue without voice
     }
+    
   } catch (err) {
-    console.error('Voice error:', err);
-    await ctx.reply('Sorry, error processing voice. Try typing instead.');
+    console.error('Voice processing error:', err.message);
+    await ctx.reply('Error processing voice. Please try shorter message.');
   }
 });
 
@@ -466,49 +402,103 @@ bot.on('text', async (ctx) => {
   let replyText;
   if (supabaseAvailable) {
     const kbAnswer = await findInSupabase(userText);
-    if (kbAnswer) {
-      replyText = kbAnswer;
-    } else {
-      replyText = getDefaultResponse(userText);
-    }
+    replyText = kbAnswer || getDefaultResponse(userText);
   } else {
     replyText = getDefaultResponse(userText);
   }
 
   await ctx.reply(replyText);
-
+  
   try {
     const voiceBuffer = await textToVoice(replyText);
     await ctx.replyWithVoice({ source: voiceBuffer });
   } catch (err) {
-    console.error('Voice synthesis failed:', err.message);
+    console.log('Voice synthesis failed for text:', err.message);
   }
+  
 });
 
-// ==================== DEPLOYMENT MODE ====================
+// ==================== DEPLOYMENT ====================
 
 if (isProduction) {
-  // Production mode with webhook (for Render)
-  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `https://your-service-name.onrender.com`;
+  // Production with webhook
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
   
-  // Set webhook
-  bot.telegram.setWebhook(`${RENDER_URL}/bot${process.env.BOT_TOKEN}`);
+  if (!RENDER_URL) {
+    console.error('RENDER_EXTERNAL_URL not set in production');
+    process.exit(1);
+  }
   
-  // Use webhook callback
-  app.use(bot.webhookCallback(`/bot${process.env.BOT_TOKEN}`));
+  const webhookPath = `/bot${process.env.BOT_TOKEN}`;
+  const webhookUrl = `${RENDER_URL}${webhookPath}`;
   
-  app.listen(PORT, () => {
-    console.log(`Bot running in production mode on port ${PORT}`);
-    console.log(`Webhook URL: ${RENDER_URL}/bot${process.env.BOT_TOKEN}`);
-    console.log(`Health check: ${RENDER_URL}/health`);
+  console.log(`Setting webhook: ${webhookUrl}`);
+  
+  // Set webhook with retry
+  const setWebhookWithRetry = async (retries = 3) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        await bot.telegram.setWebhook(webhookUrl);
+        console.log('Webhook set successfully');
+        return true;
+      } catch (err) {
+        console.error(`Webhook attempt ${i + 1} failed:`, err.message);
+        if (i < retries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+    return false;
+  };
+  
+  setWebhookWithRetry().then(success => {
+    if (success) {
+      app.use(bot.webhookCallback(webhookPath));
+      
+      app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+        console.log(`Health check: ${RENDER_URL}/health`);
+        console.log(`Webhook: ${webhookUrl}`);
+      });
+    } else {
+      console.error('Failed to set webhook after retries');
+      process.exit(1);
+    }
   });
 } else {
-  // Development mode with polling
+  // Development with polling
   bot.launch().then(() => {
-    console.log('Bot running in development mode');
+    console.log('Bot running in development mode (polling)');
+  }).catch(err => {
+    console.error('Failed to start bot:', err.message);
   });
 }
 
 // Graceful shutdown
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  console.log('Shutting down...');
+  bot.stop('SIGINT');
+  process.exit(0);
+});
+
+process.once('SIGTERM', () => {
+  console.log('Shutting down...');
+  bot.stop('SIGTERM');
+  process.exit(0);
+});
+
+// Memory monitoring
+if (isProduction) {
+  setInterval(() => {
+    const memory = process.memoryUsage();
+    const heapUsedMB = memory.heapUsed / 1024 / 1024;
+    
+    if (heapUsedMB > 250) {
+      console.warn(`High memory: ${heapUsedMB.toFixed(1)}MB`);
+      cleanupMemory();
+    }
+    
+    // Log memory every 5 minutes
+    console.log(`Memory usage: ${heapUsedMB.toFixed(1)}MB`);
+  }, 300000); // 5 minutes
+}
