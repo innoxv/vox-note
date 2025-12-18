@@ -266,6 +266,70 @@ const QUESTION_PATTERNS = [
   { regex: /^(how to|how do i|steps to|guide to)/i, type: 'howto' },
 ];
 
+## AI Prompt Journal
+### Prompt 1: Initial Architecture Design
+Prompt Used: "Design a Telegram bot architecture that uses Whisper AI for speech-to-text, Supabase for knowledge storage, and responds with voice messages. Include error handling and scalability considerations."
+
+AI Response Summary: AI provided a comprehensive architecture diagram with:
+
+- Telegram Bot ↔ Telegraf middleware
+
+- Whisper pipeline for STT
+
+- Supabase for RAG pattern implementation
+
+- gTTS for TTS synthesis
+
+- Error handling for network failures
+
+- Evaluation: Extremely helpful. The architecture was 90% correct, but needed adjustments for:
+
+- Memory management with Whisper model
+
+- Proper audio format conversion
+
+- Connection pooling for Supabase
+
+### Prompt 2: Audio Processing Issue
+Prompt Used: "I'm getting 'Invalid audio data' error when passing audio to Whisper. The audio is from Telegram voice messages. How do I properly decode OGG/OPUS to PCM float32 array?"
+
+AI Response Summary: AI explained the audio pipeline:
+
+text
+Telegram OGG/OPUS → FFmpeg decode → PCM f32le → Float32Array → Whisper
+Provided code snippet:
+
+javascript
+const ff = spawn('ffmpeg', [
+  '-i', 'pipe:0', '-f', 'f32le', '-ar', '16000', '-ac', '1', 'pipe:1'
+]);
+Evaluation: Critical fix. Without this, the bot wouldn't work at all. The FFmpeg command was exactly what was needed.
+
+### Prompt 3: Knowledge Base Search Optimization
+Prompt Used: "My bot is doing simple ILIKE queries but I need better matching. Users ask 'how to reset password' but the knowledge base has 'password reset instructions'. How can I improve matching with synonyms and word variations?"
+
+AI Response Summary: AI suggested multiple strategies:
+
+- Synonym mapping dictionary
+
+- Word stemming/lemmatization
+
+- TF-IDF similarity scoring
+
+- Pre-processing queries
+
+- Provided enhanced findInSupabase() function with:
+
+- Word overlap calculation
+
+- Synonym expansion
+
+- Scoring system for best match
+
+Evaluation: Transformative. Went from 30% match rate to 85% with the enhanced algorithm.
+
+
+
 ## Common Issues & Fixes
 1. Issue 1: "FFmpeg not found" Error
 Error Message: Error: spawn ffmpeg ENOENT
