@@ -16,15 +16,15 @@ Node.js/Telegraf: Rapid development with strong ecosystem support
 
 End Goal: Create a fully functional AI voice support bot that:
 
-  Accepts voice messages and transcribes them to text
+- Accepts voice messages and transcribes them to text
   
-  Searches a knowledge base for relevant answers using RAG principles
+-  Searches a knowledge base for relevant answers using RAG principles
   
-  Responds with both text and synthesized voice
+-  Responds with both text and synthesized voice
   
-  Learns dynamically from user interactions via /add command
+-  Learns dynamically from user interactions via /add command
   
-  Provides 24/7 automated support with natural conversation flow
+-  Provides 24/7 automated support with natural conversation flow
 
 ## Quick Summary of the Technology
 What is this technology stack?
