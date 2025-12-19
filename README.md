@@ -110,30 +110,30 @@ text
 added 125 packages in 15.2s
 
 ## Step 3: Install System Dependencies (FFmpeg)
-## Ubuntu/Debian:
+### Ubuntu/Debian:
 
 bash
 `sudo apt update`
 `sudo apt install ffmpeg`
 
-## macOS (Homebrew):
+### macOS (Homebrew):
 
 bash
 `brew install ffmpeg`
 
-## Windows (Chocolatey):
+### Windows (Chocolatey):
 
 bash
 `choco install ffmpeg`
 
-Verify installation:
+### Verify installation:
 
 bash
 `ffmpeg -version`
 
 Should show: ffmpeg version 4.x or higher
 
-### Step 4: Create Environment Configuration
+## Step 4: Create Environment Configuration
 bash
 ### Copy template
 `cp .env.example .env`
