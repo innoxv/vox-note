@@ -642,7 +642,7 @@ const decodeAudioToFloat32 = async (url) => {
 const textToVoice = async (text) => {
   return processWithTimeout(() => {
     return new Promise((resolve, reject) => {
-      const tts = new gTTS(text.substring(0, 500), 'en');
+      const tts = new gTTS(text.substring(0, 500), 'en-us'); // US English female
       const tmpFile = path.join(os.tmpdir(), `tts-${Date.now()}.mp3`);
       
       tts.save(tmpFile, (err) => {
