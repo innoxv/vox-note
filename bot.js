@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, session, MemorySessionStore } = require('telegraf');
 const { pipeline } = require('@xenova/transformers');
 const axios = require('axios');
 const { PdfReader } = require("pdfreader");
@@ -33,7 +33,7 @@ try {
 
 let supabaseAvailable = !!supabase;
 
-// ==================== ENHANCED MATCHING FUNCTIONS (PRESERVED) ====================
+// ==================== ENHANCED MATCHING FUNCTIONS ====================
 
 const SYNONYM_MAP = {
   'hello': ['hi', 'hey', 'hi there', 'hello there', 'howdy', 'greetings', 'yo', 'sup'],
@@ -332,7 +332,7 @@ const GROQ_CONFIG = {
   defaultModel: 'llama-3.1-8b-instant'
 };
 
-// ==================== PDF PROCESSING WITH PDFREADER ====================
+// ==================== PDF PROCESSING ====================
 const extractTextFromPDF = async (buffer) => {
   return new Promise((resolve, reject) => {
     const textByPage = {};
@@ -345,7 +345,6 @@ const extractTextFromPDF = async (buffer) => {
       if (err) {
         reject(new Error(`PDF parsing error: ${err.message}`));
       } else if (!item) {
-        // End of file
         const pages = Object.keys(textByPage).sort((a, b) => parseInt(a) - parseInt(b));
         pages.forEach(pageNum => {
           fullText += `Page ${pageNum}:\n${textByPage[pageNum]}\n\n`;
@@ -379,7 +378,6 @@ const processDocument = async (fileBuffer, fileType, fileName = 'document') => {
     try {
       console.log(`Processing PDF: ${fileName}, Size: ${fileBuffer.length} bytes`);
       
-      // Check if it's a valid PDF by checking the header
       if (fileBuffer.length >= 5) {
         const header = fileBuffer.slice(0, 5).toString('ascii');
         if (header !== '%PDF-') {
@@ -536,6 +534,11 @@ const bot = new Telegraf(process.env.BOT_TOKEN, {
   handlerTimeout: 29000
 });
 
+bot.use(session({
+  store: new MemorySessionStore(),
+  defaultSession: () => ({})
+}));
+
 // ==================== WHISPER MODEL ====================
 let transcriber = null;
 let isModelLoading = false;
@@ -656,7 +659,46 @@ const textToVoice = async (text) => {
 };
 
 // ==================== ENHANCED ANSWER FINDING ====================
-const enhancedFindAnswer = async (query) => {
+const enhancedFindAnswer = async (query, useAI = false) => {
+  if (useAI) {
+    if (GROQ_CONFIG.enabled) {
+      try {
+        let context = null;
+        if (supabaseAvailable) {
+          try {
+            const { data } = await supabase
+              .from('knowledge_base')
+              .select('answer')
+              .or(`answer.ilike.%${query.substring(0, 20)}%,question.ilike.%${query.substring(0, 20)}%`)
+              .limit(2);
+            
+            if (data && data.length > 0) {
+              context = data.map(item => item.answer).join('\n');
+            }
+          } catch (contextErr) {
+            console.log('Context fetch error:', contextErr.message);
+          }
+        }
+        
+        const aiAnswer = await queryGroqAI(query, context);
+        
+        if (aiAnswer) {
+          return {
+            source: 'groq_ai',
+            answer: aiAnswer
+          };
+        }
+      } catch (error) {
+        console.error('Groq AI error:', error.message);
+      }
+    }
+    
+    return {
+      source: 'default',
+      answer: getDefaultResponse(query)
+    };
+  }
+  
   if (supabaseAvailable) {
     try {
       const kbAnswer = await processWithTimeout(
@@ -733,7 +775,7 @@ const getKnowledgeCount = async () => {
   }
 };
 
-// ==================== ENHANCED BOT COMMANDS ====================
+// ==================== BOT COMMANDS ====================
 
 bot.start(async (ctx) => {
   let welcomeMsg;
@@ -741,16 +783,17 @@ bot.start(async (ctx) => {
   if (supabaseAvailable) {
     const knowledgeCount = await getKnowledgeCount();
     welcomeMsg = `Welcome! I'm your AI voice assistant with ${knowledgeCount} pieces of knowledge.\n\n` +
-                `Send voice or text, and I'll reply from my knowledge base!\n` +
-                `Try: /faq - See common questions\n` +
-                `Try: /search [topic] - Search knowledge\n` +
-                `Try: /add "question" || "answer" - Add new knowledge`;
-    
-    if (GROQ_CONFIG.enabled) {
-      welcomeMsg += `\n\nI also have Groq AI integration for complex questions!\n` +
-                   `Use /ask [question] for AI responses\n` +
-                   `Use /groqstatus to check AI status`;
-    }
+                `Send voice or text, and I'll reply from my knowledge base!\n\n` +
+                `**Commands:**\n` +
+                `/voiceai - Voice AI mode: /voiceai on or /voiceai off\n` +
+                `/mode - Interactive menu to set voice/text/both modes\n` +
+                `/ask - Force AI response: /ask [question]\n` +
+                `/groqstatus - Check AI status\n` +
+                `/add - Add knowledge: /add "question" || "answer"\n` +
+                `/search - Search knowledge: /search [query]\n` +
+                `/faq - Show frequently asked questions\n` +
+                `/stats - Show bot statistics\n` +
+                `/setmodel - Change AI model`;
   } else {
     welcomeMsg = 'Welcome! Send voice or text. (Knowledge base not available)';
     if (GROQ_CONFIG.enabled) {
@@ -758,7 +801,7 @@ bot.start(async (ctx) => {
     }
   }
   
-  ctx.reply(welcomeMsg);
+  ctx.reply(welcomeMsg, { parse_mode: 'Markdown' });
 });
 
 bot.command('add', async (ctx) => {
@@ -869,7 +912,7 @@ bot.command('faq', async (ctx) => {
       response += '**Add:** `/add "question" || "answer"`';
       
       if (GROQ_CONFIG.enabled) {
-        response += '\n**AI:** `/ask [question]`';
+        response += '\n**AI:** `/ask [question]` or `/voiceai on`';
       }
       
       await ctx.reply(response, { parse_mode: 'Markdown' });
@@ -900,19 +943,28 @@ bot.command('stats', async (ctx) => {
   
   if (GROQ_CONFIG.enabled) {
     response += `\nUse /groqstatus for AI details`;
+    response += `\nUse /mode to switch between KB and AI`;
   }
   
   await ctx.reply(response, { parse_mode: 'Markdown' });
 });
 
-// ==================== NEW GROQ COMMANDS ====================
+// ==================== GROQ COMMANDS ====================
 
 bot.command('ask', async (ctx) => {
   if (!GROQ_CONFIG.enabled) {
     return ctx.reply('Groq AI is not enabled. Please set GROQ_API_KEY in environment variables.');
   }
   
-  const question = ctx.message.text.replace(/^\/ask\s*/i, '').trim();
+  const fullCommand = ctx.message.text.trim();
+  let question = '';
+  
+  if (fullCommand.toLowerCase().startsWith('/ask ')) {
+    question = fullCommand.replace(/^\/ask\s*/i, '').trim();
+  } else {
+    question = ctx.message.text.replace(/^\/ask/i, '').trim();
+  }
+  
   if (!question) {
     return ctx.reply('Usage: /ask [your question]\nExample: /ask What is machine learning?');
   }
@@ -950,7 +1002,7 @@ bot.command('groqstatus', async (ctx) => {
     
     GROQ_CONFIG.availableModels.forEach(model => {
       const isDefault = model === GROQ_CONFIG.defaultModel;
-      response += `${isDefault ? '  • ✅ ' : '  • '}${model}\n`;
+      response += `  • ${isDefault ? '✅ ' : ''}${model}\n`;
     });
     
     try {
@@ -996,7 +1048,7 @@ bot.command('setmodel', async (ctx) => {
     
     GROQ_CONFIG.availableModels.forEach(model => {
       const isDefault = model === GROQ_CONFIG.defaultModel;
-      response += `${isDefault ? '• ✅ ' : '• '}${model}\n`;
+      response += `• ${isDefault ? '✅ ' : ''}${model}\n`;
     });
     
     response += '\n**Usage:** `/setmodel [model_name]`\n';
@@ -1012,6 +1064,121 @@ bot.command('setmodel', async (ctx) => {
   GROQ_CONFIG.defaultModel = modelName;
   
   ctx.reply(`Model set to: **${modelName}**`, { parse_mode: 'Markdown' });
+});
+
+// ==================== VOICE AI COMMANDS ====================
+
+bot.command('voiceai', async (ctx) => {
+  if (!GROQ_CONFIG.enabled) {
+    return ctx.reply('Groq AI is not enabled. Please set GROQ_API_KEY in environment variables.');
+  }
+  
+  const fullCommand = ctx.message.text.trim();
+  let mode = '';
+  
+  if (fullCommand.toLowerCase().startsWith('/voiceai ')) {
+    mode = fullCommand.replace(/^\/voiceai\s*/i, '').trim().toLowerCase();
+  } else if (fullCommand.toLowerCase().startsWith('/voiceaion')) {
+    mode = 'on';
+  } else if (fullCommand.toLowerCase().startsWith('/voiceaioff')) {
+    mode = 'off';
+  } else {
+    mode = '';
+  }
+  
+  if (!mode || (mode !== 'on' && mode !== 'off')) {
+    const currentMode = ctx.session.voiceAIMode ? 'ON (AI mode)' : 'OFF (KB mode)';
+    return ctx.reply(
+      `Current voice AI mode: **${currentMode}**\n\n` +
+      `**Usage:**\n` +
+      `• \`/voiceai on\` - Voice queries use AI\n` +
+      `• \`/voiceai off\` - Voice queries use KB first\n` +
+      `• \`/voiceaion\` - Shortcut for /voiceai on\n` +
+      `• \`/voiceaioff\` - Shortcut for /voiceai off\n\n` +
+      `Use /mode to control both voice and text modes`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+  
+  if (mode === 'on') {
+    ctx.session.voiceAIMode = true;
+    ctx.reply(
+      '✅ **Voice AI mode enabled!**\n\n' +
+      'All voice queries will now use the external AI model.\n' +
+      'Use `/voiceai off` or `/voiceaioff` to switch back to knowledge base mode.',
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    ctx.session.voiceAIMode = false;
+    ctx.reply(
+      '✅ **Voice AI mode disabled.**\n\n' +
+      'Voice queries will now use the knowledge base first.\n' +
+      'Use `/voiceai on` or `/voiceaion` to switch to AI mode.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
+
+bot.command('voiceaion', async (ctx) => {
+  if (!GROQ_CONFIG.enabled) {
+    return ctx.reply('Groq AI is not enabled. Please set GROQ_API_KEY in environment variables.');
+  }
+  
+  ctx.session.voiceAIMode = true;
+  ctx.reply(
+    '✅ **Voice AI mode enabled!**\n\n' +
+    'All voice queries will now use the external AI model.\n' +
+    'Use `/voiceai off` or `/voiceaioff` to switch back to knowledge base mode.',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('voiceaioff', async (ctx) => {
+  if (!GROQ_CONFIG.enabled) {
+    return ctx.reply('Groq AI is not enabled. Please set GROQ_API_KEY in environment variables.');
+  }
+  
+  ctx.session.voiceAIMode = false;
+  ctx.reply(
+    '✅ **Voice AI mode disabled.**\n\n' +
+    'Voice queries will now use the knowledge base first.\n' +
+    'Use `/voiceai on` or `/voiceaion` to switch to AI mode.',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('mode', async (ctx) => {
+  if (!GROQ_CONFIG.enabled) {
+    return ctx.reply('Groq AI is not enabled. Please set GROQ_API_KEY in environment variables.');
+  }
+  
+  const currentVoiceMode = ctx.session.voiceAIMode ? 'ON (AI mode)' : 'OFF (KB mode)';
+  const currentTextMode = ctx.session.textAIMode ? 'ON (AI mode)' : 'OFF (KB mode)';
+  
+  const inlineKeyboard = {
+    inline_keyboard: [
+      [
+        { text: 'Voice: KB Mode', callback_data: 'mode_voice_kb' },
+        { text: 'Voice: AI Mode', callback_data: 'mode_voice_ai' }
+      ],
+      [
+        { text: 'Text: KB Mode', callback_data: 'mode_text_kb' },
+        { text: 'Text: AI Mode', callback_data: 'mode_text_ai' }
+      ],
+      [
+        { text: 'Both: KB Mode', callback_data: 'mode_both_kb' },
+        { text: 'Both: AI Mode', callback_data: 'mode_both_ai' }
+      ]
+    ]
+  };
+  
+  await ctx.reply(
+    `**Current Modes:**\n` +
+    `• Voice: ${currentVoiceMode}\n` +
+    `• Text: ${currentTextMode}\n\n` +
+    `Select your preferred mode:`,
+    { reply_markup: inlineKeyboard, parse_mode: 'Markdown' }
+  );
 });
 
 // ==================== DOCUMENT UPLOAD HANDLER ====================
@@ -1075,17 +1242,30 @@ bot.on('document', async (ctx) => {
     
     await ctx.reply(statusMessage);
     
-    ctx.session = ctx.session || {};
-    ctx.session.lastDocumentText = text;
-    ctx.session.lastDocumentName = fileName;
+    const userId = ctx.from.id;
+    ctx.session.userId = userId;
+    ctx.session.documentText = text;
+    ctx.session.documentName = fileName;
+    ctx.session.documentTimestamp = Date.now();
+    
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [
+          { text: 'Ask a question', callback_data: 'doc_ask' }
+        ],
+        [
+          { text: 'Summarize', callback_data: 'doc_summarize' },
+          { text: 'Save to KB', callback_data: 'doc_save' }
+        ],
+        [
+          { text: 'Extract key info', callback_data: 'doc_extract' }
+        ]
+      ]
+    };
     
     await ctx.reply(
-      `What would you like to do with "${fileName}"?\n\n` +
-      `1. Ask a question about it\n` +
-      `2. Summarize it\n` +
-      `3. Save to knowledge base\n` +
-      `4. Extract key information\n\n` +
-      `Reply with 1, 2, 3, or 4`
+      `What would you like to do with "${fileName}"?`,
+      { reply_markup: inlineKeyboard }
     );
     
   } catch (error) {
@@ -1113,6 +1293,149 @@ bot.on('document', async (ctx) => {
     }
     
     await ctx.reply(errorMessage);
+  }
+});
+
+// ==================== CALLBACK QUERY HANDLER ====================
+
+bot.on('callback_query', async (ctx) => {
+  const callbackData = ctx.callbackQuery.data;
+  const messageId = ctx.callbackQuery.message.message_id;
+  const userId = ctx.callbackQuery.from.id;
+  
+  await ctx.answerCbQuery();
+  
+  try {
+    await ctx.deleteMessage(messageId);
+  } catch (err) {
+    console.log('Could not delete message:', err.message);
+  }
+  
+  if (callbackData.startsWith('mode_')) {
+    const parts = callbackData.split('_');
+    const target = parts[1];
+    const mode = parts[2];
+    
+    if (target === 'voice' || target === 'both') {
+      ctx.session.voiceAIMode = (mode === 'ai');
+    }
+    
+    if (target === 'text' || target === 'both') {
+      ctx.session.textAIMode = (mode === 'ai');
+    }
+    
+    const voiceMode = ctx.session.voiceAIMode ? 'AI Mode' : 'KB Mode';
+    const textMode = ctx.session.textAIMode ? 'AI Mode' : 'KB Mode';
+    
+    await ctx.reply(
+      `✅ Mode updated!\n\n` +
+      `• Voice queries: **${voiceMode}**\n` +
+      `• Text queries: **${textMode}**\n\n` +
+      `Use /voiceai on/off for voice-only control\n` +
+      `Use /mode to change again`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    return;
+  }
+  
+  if (callbackData.startsWith('doc_')) {
+    if (ctx.session.userId !== userId) {
+      await ctx.reply('Session expired. Please upload the document again.');
+      return;
+    }
+    
+    if (!ctx.session.documentText) {
+      await ctx.reply('Document context lost. Please upload the document again.');
+      return;
+    }
+    
+    const docText = ctx.session.documentText;
+    const docName = ctx.session.documentName || 'the document';
+    
+    switch (callbackData) {
+      case 'doc_ask':
+        await ctx.reply(`Please ask your question about "${docName}":`);
+        ctx.session.waitingForQuestion = true;
+        break;
+        
+      case 'doc_summarize':
+        await ctx.reply(`Creating summary of "${docName}"...`);
+        
+        try {
+          const summary = await queryGroqAI(
+            `Please summarize this document in 3-5 key bullet points:\n\n` +
+            `Document: ${docName}\n` +
+            `Content:\n${docText.substring(0, 4000)}`
+          );
+          
+          if (summary) {
+            await ctx.reply(`<b>Summary of ${docName}:</b>\n\n${summary}`, { parse_mode: 'HTML' });
+          } else {
+            await ctx.reply('Could not generate summary. AI service unavailable.');
+          }
+        } catch (error) {
+          console.error('Summary generation error:', error);
+          await ctx.reply('Error generating summary. Please try again.');
+        }
+        
+        delete ctx.session.documentText;
+        delete ctx.session.documentName;
+        delete ctx.session.documentTimestamp;
+        break;
+        
+      case 'doc_save':
+        if (supabaseAvailable) {
+          try {
+            const question = `Content from: ${docName}`;
+            const answer = `Document: ${docName}\n\nKey content:\n${docText.substring(0, 3000)}${docText.length > 3000 ? '...' : ''}`;
+            
+            const { result } = await addKnowledge(`${question} || ${answer}`);
+            
+            await ctx.reply(`Document saved to knowledge base!\n\n${result}`);
+          } catch (error) {
+            console.error('Save to KB error:', error);
+            await ctx.reply('Error saving to knowledge base. Please try again.');
+          }
+        } else {
+          await ctx.reply('Knowledge base unavailable.');
+        }
+        
+        delete ctx.session.documentText;
+        delete ctx.session.documentName;
+        delete ctx.session.documentTimestamp;
+        break;
+        
+      case 'doc_extract':
+        await ctx.reply(`Extracting key information from "${docName}"...`);
+        
+        try {
+          const keyInfo = await queryGroqAI(
+            `Extract the most important information from this document:\n\n` +
+            `Document: ${docName}\n` +
+            `Content:\n${docText.substring(0, 4000)}\n\n` +
+            `Please provide:\n` +
+            `1. Main topics/subjects\n` +
+            `2. Key dates/numbers\n` +
+            `3. Important names/organizations\n` +
+            `4. Main conclusions/recommendations`
+          );
+          
+          if (keyInfo) {
+            await ctx.reply(`<b>Key Information from ${docName}:</b>\n\n${keyInfo}`, { parse_mode: 'HTML' });
+          } else {
+            await ctx.reply('Could not extract key information. AI service unavailable.');
+          }
+        } catch (error) {
+          console.error('Key info extraction error:', error);
+          await ctx.reply('Error extracting information. Please try again.');
+        }
+        
+        delete ctx.session.documentText;
+        delete ctx.session.documentName;
+        delete ctx.session.documentTimestamp;
+        break;
+    }
   }
 });
 
@@ -1163,7 +1486,9 @@ bot.on('voice', async (ctx) => {
       await saveTranscript(ctx.from?.id, userText, 'voice');
     }
 
-    const response = await enhancedFindAnswer(userText);
+    const useAI = ctx.session.voiceAIMode || false;
+    
+    const response = await enhancedFindAnswer(userText, useAI);
     
     const sourceLabel = response.source === 'knowledge_base' ? 'Knowledge Base' : 
                        response.source === 'groq_ai' ? 'AI Response' : 'Default';
@@ -1186,101 +1511,16 @@ bot.on('voice', async (ctx) => {
 bot.on('text', async (ctx) => {
   const messageId = ctx.message.message_id;
   const userText = ctx.message.text?.trim();
+  const userId = ctx.from.id;
   
   if (!userText || userText.startsWith('/')) return;
   
-  if (ctx.session && ctx.session.lastDocumentText) {
-    const choice = userText.trim();
-    const docText = ctx.session.lastDocumentText;
-    const docName = ctx.session.lastDocumentName || 'the document';
-    
-    if (choice === '1') {
-      await ctx.reply(`Please ask your question about "${docName}":`);
-      ctx.session.waitingForQuestion = true;
-      ctx.session.documentText = docText;
-      ctx.session.documentName = docName;
-      return;
-    } else if (choice === '2') {
-      await ctx.reply(`Creating summary of "${docName}"...`);
-      
-      try {
-        const summary = await queryGroqAI(
-          `Please summarize this document in 3-5 key bullet points:\n\n` +
-          `Document: ${docName}\n` +
-          `Content:\n${docText.substring(0, 4000)}`
-        );
-        
-        if (summary) {
-          await ctx.reply(`<b>Summary of ${docName}:</b>\n\n${summary}`, { parse_mode: 'HTML' });
-        } else {
-          await ctx.reply('Could not generate summary. AI service unavailable.');
-        }
-      } catch (error) {
-        console.error('Summary generation error:', error);
-        await ctx.reply('Error generating summary. Please try again.');
-      }
-      
-      delete ctx.session.lastDocumentText;
-      delete ctx.session.lastDocumentName;
-      return;
-    } else if (choice === '3') {
-      if (supabaseAvailable) {
-        try {
-          const question = `Content from: ${docName}`;
-          const answer = `Document: ${docName}\n\nKey content:\n${docText.substring(0, 3000)}${docText.length > 3000 ? '...' : ''}`;
-          
-          const { result } = await addKnowledge(`${question} || ${answer}`);
-          
-          await ctx.reply(`Document saved to knowledge base!\n\n${result}`);
-        } catch (error) {
-          console.error('Save to KB error:', error);
-          await ctx.reply('Error saving to knowledge base. Please try again.');
-        }
-      } else {
-        await ctx.reply('Knowledge base unavailable.');
-      }
-      
-      delete ctx.session.lastDocumentText;
-      delete ctx.session.lastDocumentName;
-      return;
-    } else if (choice === '4') {
-      await ctx.reply(`Extracting key information from "${docName}"...`);
-      
-      try {
-        const keyInfo = await queryGroqAI(
-          `Extract the most important information from this document:\n\n` +
-          `Document: ${docName}\n` +
-          `Content:\n${docText.substring(0, 4000)}\n\n` +
-          `Please provide:\n` +
-          `1. Main topics/subjects\n` +
-          `2. Key dates/numbers\n` +
-          `3. Important names/organizations\n` +
-          `4. Main conclusions/recommendations`
-        );
-        
-        if (keyInfo) {
-          await ctx.reply(`<b>Key Information from ${docName}:</b>\n\n${keyInfo}`, { parse_mode: 'HTML' });
-        } else {
-          await ctx.reply('Could not extract key information. AI service unavailable.');
-        }
-      } catch (error) {
-        console.error('Key info extraction error:', error);
-        await ctx.reply('Error extracting information. Please try again.');
-      }
-      
-      delete ctx.session.lastDocumentText;
-      delete ctx.session.lastDocumentName;
-      return;
-    }
-    
-    delete ctx.session.lastDocumentText;
-    delete ctx.session.lastDocumentName;
-  }
-  
-  if (ctx.session && ctx.session.waitingForQuestion) {
+  if (ctx.session && ctx.session.waitingForQuestion && ctx.session.userId === userId) {
     const question = userText;
     const docText = ctx.session.documentText;
     const docName = ctx.session.documentName || 'the document';
+    
+    delete ctx.session.waitingForQuestion;
     
     await ctx.reply('Thinking about your question...');
     
@@ -1298,9 +1538,9 @@ bot.on('text', async (ctx) => {
       await ctx.reply('Error answering question.');
     }
     
-    delete ctx.session.waitingForQuestion;
     delete ctx.session.documentText;
     delete ctx.session.documentName;
+    delete ctx.session.documentTimestamp;
     return;
   }
   
@@ -1319,7 +1559,9 @@ bot.on('text', async (ctx) => {
     await saveTranscript(ctx.from?.id, userText, 'text');
   }
 
-  const response = await enhancedFindAnswer(userText);
+  const useAI = ctx.session.textAIMode || false;
+  
+  const response = await enhancedFindAnswer(userText, useAI);
   
   const sourceLabel = response.source === 'knowledge_base' ? 'Knowledge Base' : 
                      response.source === 'groq_ai' ? 'AI Response' : 'Default';
