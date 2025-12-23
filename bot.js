@@ -838,12 +838,28 @@ bot.command('search', async (ctx) => {
     const result = await findInSupabase(query);
     if (result) {
       await ctx.reply(`**Found:**\n\n${result}`, { parse_mode: 'Markdown' });
+      
+      // ADDED: Generate voice response for document-based answers
+      try {
+        const voiceBuffer = await textToVoice(result.replace(/\*\*/g, '').replace(/`/g, ''));
+        await ctx.replyWithVoice({ source: voiceBuffer });
+      } catch (err) {
+        console.error('Voice generation failed for document answer:', err.message);
+      }
     } else {
       if (GROQ_CONFIG.enabled) {
         await ctx.reply('Not found in knowledge base. Asking AI...');
         const aiResponse = await queryGroqAI(query);
         if (aiResponse) {
           await ctx.reply(`<b>AI Response:</b>\n\n${aiResponse}`, { parse_mode: 'HTML' });
+          
+          // ADDED: Generate voice response for AI answers
+          try {
+            const voiceBuffer = await textToVoice(aiResponse.replace(/\*\*/g, '').replace(/`/g, ''));
+            await ctx.replyWithVoice({ source: voiceBuffer });
+          } catch (err) {
+            console.error('Voice generation failed for AI answer:', err.message);
+          }
         } else {
           const suggestions = await getRelatedSuggestions(query);
           let reply = `No exact match for "${query}"`;
@@ -1364,13 +1380,21 @@ bot.on('callback_query', async (ctx) => {
         
         try {
           const summary = await queryGroqAI(
-            `Please summarize this document in 3-5 key bullet points:\n\n` +
-            `Document: ${docName}\n` +
-            `Content:\n${docText.substring(0, 4000)}`
+            `Please summarize the following document content in 3-5 key bullet points:\n\n` +
+            `DOCUMENT CONTENT:\n${docText}\n\n` +
+            `Provide a concise summary of the main points.`
           );
           
           if (summary) {
             await ctx.reply(`<b>Summary of ${docName}:</b>\n\n${summary}`, { parse_mode: 'HTML' });
+            
+            // ADDED: Generate voice response for document summary
+            try {
+              const voiceBuffer = await textToVoice(summary.replace(/\*\*/g, '').replace(/`/g, ''));
+              await ctx.replyWithVoice({ source: voiceBuffer });
+            } catch (err) {
+              console.error('Voice generation failed for document summary:', err.message);
+            }
           } else {
             await ctx.reply('Could not generate summary. AI service unavailable.');
           }
@@ -1411,9 +1435,8 @@ bot.on('callback_query', async (ctx) => {
         
         try {
           const keyInfo = await queryGroqAI(
-            `Extract the most important information from this document:\n\n` +
-            `Document: ${docName}\n` +
-            `Content:\n${docText.substring(0, 4000)}\n\n` +
+            `Extract the most important information from this document content:\n\n` +
+            `DOCUMENT CONTENT:\n${docText}\n\n` +
             `Please provide:\n` +
             `1. Main topics/subjects\n` +
             `2. Key dates/numbers\n` +
@@ -1423,6 +1446,14 @@ bot.on('callback_query', async (ctx) => {
           
           if (keyInfo) {
             await ctx.reply(`<b>Key Information from ${docName}:</b>\n\n${keyInfo}`, { parse_mode: 'HTML' });
+            
+            // ADDED: Generate voice response for extracted key info
+            try {
+              const voiceBuffer = await textToVoice(keyInfo.replace(/\*\*/g, '').replace(/`/g, ''));
+              await ctx.replyWithVoice({ source: voiceBuffer });
+            } catch (err) {
+              console.error('Voice generation failed for key info:', err.message);
+            }
           } else {
             await ctx.reply('Could not extract key information. AI service unavailable.');
           }
@@ -1526,11 +1557,22 @@ bot.on('text', async (ctx) => {
     
     try {
       const answer = await queryGroqAI(
-        `Based on this document:\n\n${docText.substring(0, 3000)}\n\nQuestion: ${question}\n\nAnswer:`
+        `Based on the following document content:\n\n` +
+        `DOCUMENT CONTENT:\n${docText}\n\n` +
+        `Question: ${question}\n\n` +
+        `Answer:`
       );
       
       if (answer) {
         await ctx.reply(`<b>Answer:</b>\n\n${answer}`, { parse_mode: 'HTML' });
+        
+        // ADDED: Generate voice response for document question answers
+        try {
+          const voiceBuffer = await textToVoice(answer.replace(/\*\*/g, '').replace(/`/g, ''));
+          await ctx.replyWithVoice({ source: voiceBuffer });
+        } catch (err) {
+          console.error('Voice generation failed for document answer:', err.message);
+        }
       } else {
         await ctx.reply('Could not answer question. AI service unavailable.');
       }
